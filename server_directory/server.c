@@ -5,7 +5,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <errno.h>
-#define LISTEN_PORT 5000 //random number > 1024
+#define LISTEN_PORT 4000 //random number > 1024
 #define BACKLOG 5 //number of clients that can be waiting at the same time
 #define MAX_CMD_LEN 1024
 
@@ -119,13 +119,10 @@ void handle_client(int client_fd)
     char cmd[MAX_CMD_LEN];
     while (1)
     {
-        printf("very beggining of the loop\n");
         ssize_t n = recv_line(client_fd, cmd, MAX_CMD_LEN);
-        printf("before chopping up input\n");
         char* command = strtok(cmd, " \n");
         char* argument_one = strtok(NULL, " \n");
         char* argument_two = strtok(NULL, " \n");
-        printf("after chopping up input\n");
         if (n <= 0)
         {
             break; //connection closed or error
@@ -157,7 +154,47 @@ void handle_client(int client_fd)
         }
         else if (strcmp(command, "GET") == 0)
         {
-    
+            printf("argument one is %s\n", argument_one);
+            FILE* file_added = fopen(argument_one, "rb");
+            if (!file_added)
+            {
+                printf("file not found error, exit.\n");
+                continue;
+            }
+            //fseek and ftell used here to determine file size
+            fseek(file_added, 0, SEEK_END);
+            long file_size = ftell(file_added);
+            //converting file size into a string
+            char file_size_string[32];
+            sprintf(file_size_string, "%ld", file_size);
+            //sending the input data but with the file size attached
+            char send_data[strlen(argument_one) + strlen(file_size_string) + 2];
+            sprintf(send_data, "%s %s\n", argument_one, file_size_string);
+            send(client_fd, send_data, strlen(send_data), 0); //TODO: add error handling here
+            int buffer_size = 4096;
+            char file_data[buffer_size];
+            fseek(file_added, 0, SEEK_SET);
+            int current_length = 0;
+            while(current_length < file_size)
+            {
+                printf("current_length is %d", current_length);
+                int bytes_to_read = buffer_size;
+                int remaining_bytes = file_size - current_length;
+                if (remaining_bytes < buffer_size)
+                {
+                    bytes_to_read = remaining_bytes;
+                }
+                size_t bytes_read = fread(file_data, sizeof(char), bytes_to_read, file_added);
+                int bytes_sent = send(client_fd, file_data, bytes_read, 0);
+                if (bytes_sent <= 0)
+                {
+                    //TODO: impelment error handling
+                }
+                current_length = current_length + bytes_read;
+            }
+            fclose(file_added);
+            const char *resp = "GET returned succesfully\n";
+            send(client_fd, resp, strlen(resp), 0);
         }
         else if (strcmp(command, "PUT") == 0)
         {
