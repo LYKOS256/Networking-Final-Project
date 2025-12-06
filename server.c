@@ -4,10 +4,15 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <errno.h>
 #define LISTEN_PORT 4000 //random number > 1024
 #define BACKLOG 5 //number of clients that can be waiting at the same time
+#define MAX_CMD_LEN 1024
 
 void initialize_server_address(struct sockaddr_in* server_address);
+ssize_t recv_line(int fd, char *buf, size_t max_len);
+void handle_client(int client_fd);
+
 
 int main(void)
 {
@@ -53,6 +58,9 @@ int main(void)
         exit(EXIT_FAILURE);
     }
     printf("Client connected, fd = %d\n", client_fd);
+    
+    handle_client(client_fd);
+
     close(client_fd);
     close(listen_fd);
     return 0;
@@ -66,4 +74,73 @@ void initialize_server_address(struct sockaddr_in* server_address)
     //INADDR_ANY means any local IP address
     server_address->sin_addr.s_addr = htonl(INADDR_ANY);
     server_address->sin_port = htons(LISTEN_PORT);
+}
+
+ssize_t recv_line(int fd, char *buf, size_t max_len)
+{
+    size_t i = 0;
+    while (i < max_len-1)
+    {
+        char c;
+        ssize_t n = recv(fd, &c, 1, 0);
+        if (n < 0)
+        {
+            if (errno == EINTR){
+                continue;
+            }    
+            perror("recv");
+            return -1;
+        }
+        if (n == 0)
+        {
+            if (i == 0)
+            {
+                return 0; //connection closed, no data read
+            }
+            break; //connection closed
+        }
+        if (c == '\n')
+        {
+            break;
+        }
+        buf[i++] = c;
+    }
+    buf[i] = '\0';
+    return (ssize_t)i;
+}
+
+void handle_client(int client_fd)
+{
+    char cmd[MAX_CMD_LEN];
+    while (1)
+    {
+        ssize_t n = recv_line(client_fd, cmd, MAX_CMD_LEN);
+        if (n <= 0)
+        {
+            break; //connection closed or error
+        }
+        
+        if (n==0)
+        {
+            printf("Connection closed by client\n");
+            break;
+        }
+
+        printf("Received command: %s\n", cmd);
+
+        if (strcmp(cmd, "PING") == 0)
+        {
+            const char *resp = "PONG\n";
+            send(client_fd, resp, strlen(resp), 0);
+        }
+        if (strcmp(cmd, "CLOSE") == 0)
+        {
+            const char * resp = "Goodbye!\n";
+            send(client_fd, resp, strlen(resp), 0);
+            printf("Closing connection on client request\n");
+            break;
+        }
+    }
+    
+    
 }
