@@ -14,7 +14,8 @@
 #define PATH_MAX 4096
 #endif
 
-#define LISTEN_PORT 5000 //random number > 1024
+#define LISTEN_PORT_COMMAND 5000 //random number > 1024
+#define SERVER_DATA_PORT = LISTEN_PORT_COMMAND + 1
 #define BACKLOG 5 //number of clients that can be waiting at the same time
 #define MAX_CMD_LEN 1024
 #define LOG_FILE "server.log"
@@ -60,7 +61,7 @@ int main(void)
         close(listen_fd);
         exit(EXIT_FAILURE);
     }
-    printf("Bound to port %d\n", LISTEN_PORT);
+    printf("Bound to port %d\n", LISTEN_PORT_COMMAND);
     //listen() tells the socket to listen to clients
     if (listen(listen_fd, BACKLOG) < 0)
     {
@@ -68,7 +69,7 @@ int main(void)
         close(listen_fd);
         exit(EXIT_FAILURE);
     }
-    printf("Server listening to port %d\n", LISTEN_PORT);
+    printf("Server listening to port %d\n", LISTEN_PORT_COMMAND);
 
     while (1)
     {
@@ -102,7 +103,7 @@ void initialize_server_address(struct sockaddr_in* server_address)
     server_address->sin_family = AF_INET;
     //INADDR_ANY means any local IP address
     server_address->sin_addr.s_addr = htonl(INADDR_ANY);
-    server_address->sin_port = htons(LISTEN_PORT);
+    server_address->sin_port = htons(LISTEN_PORT_COMMAND);
 }
 
 // Logging function with timestamp
@@ -244,6 +245,7 @@ void handle_client(int client_fd)
                 continue;
             }
             
+
             FILE* file_added = fopen(argument_one, "rb");
             if (!file_added)
             {
@@ -255,34 +257,101 @@ void handle_client(int client_fd)
             //fseek and ftell used here to determine file size
             fseek(file_added, 0, SEEK_END);
             long file_size = ftell(file_added);
-            //converting file size into a string
-            char file_size_string[32];
-            sprintf(file_size_string, "%ld", file_size);
-            //sending the input data but with the file size attached
-            char send_data[strlen(argument_one) + strlen(file_size_string) + 2];
-            sprintf(send_data, "%s %s\n", argument_one, file_size_string);
-            send(client_fd, send_data, strlen(send_data), 0);
-            int buffer_size = 4096;
-            char file_data[buffer_size];
             fseek(file_added, 0, SEEK_SET);
-            int current_length = 0;
-            while(current_length < file_size)
+
+            //OPEN DATA CHANNEL
+            int data_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (data_listen_fd < 0)
             {
+                perror("socket(data) not opened");
+                fclose(file_added);
+                continue;
+            }
+
+            struct sockaddr_in data_address;
+            initialize_server_address(&data_address);
+            data_address.sin_port=htons(0);
+            
+            const struct sockaddr *const_data_address = 
+                (const struct  sockaddr *)&data_address;
+            
+            if ((bind(data_listen_fd, const_data_address, sizeof(data_address)) < 0))
+            {
+                perror("bind(data) failed");
+                close(data_listen_fd);
+                fclose(file_added);
+                continue;
+            }
+
+            if (listen(data_listen_fd, 1) < 0)
+            {
+                perror("listening failed (data)");
+                close(data_listen_fd);
+                fclose(file_added);
+                continue;
+            }
+            socklen_t addrlen = sizeof(data_address);
+            if ((getsockname(data_listen_fd,(struct sockaddr *) &data_address,&addrlen) < 0))
+            {
+                perror("getsockname(data)");
+                close(data_listen_fd);
+                fclose(file_added);
+                continue;
+            }
+
+            int assigned_port = ntohs(data_address.sin_port);
+            char header[256];
+            snprintf(header, sizeof(header), "DATA %d %s %ld\n", assigned_port, argument_one, file_size);
+            send(client_fd, header, strlen(header), 0);
+
+            int data_fd = accept(data_listen_fd, NULL, NULL);
+            if ((data_fd < 0))
+            {
+                perror("accept(data)");
+                close(data_listen_fd);
+                fclose(file_added);
+                continue;
+            }
+            close(data_listen_fd);
+            
+            //Sending file contents over new data connection
+            int buffer_size = 4096;                                             
+            char file_data[4096];                                               
+            int current_length = 0;                                             
+
+            while (current_length < file_size)
+            {
+                printf("current_length is %d\n", current_length);               
+
                 int bytes_to_read = buffer_size;
-                int remaining_bytes = file_size - current_length;
+                int remaining_bytes = (int)(file_size - current_length);
                 if (remaining_bytes < buffer_size)
                 {
                     bytes_to_read = remaining_bytes;
                 }
-                size_t bytes_read = fread(file_data, sizeof(char), bytes_to_read, file_added);
-                int bytes_sent = send(client_fd, file_data, bytes_read, 0);
+                size_t bytes_read = fread(file_data, sizeof(char),
+                                  bytes_to_read, file_added);
+                if (bytes_read == 0)
+                {
+                    break;                                                   
+                }
+
+                int bytes_sent = send(data_fd, file_data, bytes_read, 0);
                 if (bytes_sent <= 0)
                 {
-                    //TODO: impelment error handling
+                    // TODO: implement error handling
+                    break;                                                     
                 }
-                current_length = current_length + bytes_read;
+
+                current_length += (int)bytes_read;
             }
             fclose(file_added);
+            //CLOSE DATA CHANNEL
+            close(data_fd);
+            
+            const char *resp = "GET OK\n";
+            send(client_fd, resp, strlen(resp), 0);
+
             server_log("GET success: %s (%ld bytes)", argument_one, file_size);
         }
         else if (strcmp(command, "PUT") == 0)

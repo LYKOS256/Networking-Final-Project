@@ -5,7 +5,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
-#define SERVER_PORT 5000  //matches server's listening port
+#define SERVER_COMMAND_PORT 5000  //matches server's listening port
 
 void initialize_server_address(struct sockaddr_in* server_address);
 
@@ -47,7 +47,7 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    printf("Connected to server %s:%d\n", server_ip, SERVER_PORT);
+    printf("Connected to server %s:%d\n", server_ip, SERVER_COMMAND_PORT);
     
     // Receive and display server welcome message
     char welcome[1024];
@@ -114,31 +114,79 @@ int main(int argc, char *argv[])
                 continue;
             }
             
-            // Parse filename and size from response
-            char *recv_filename = strtok(response, " \n");
-            char *size_str = strtok(NULL, " \n");
-            if (!recv_filename || !size_str)
+            char *token = strtok(response, " \n");
+            if (!token || strcmp(token, "DATA") != 0)
             {
-                printf("Invalid server response\n");
+                printf("Invalid server response (expected DATA): %s\n", response);
                 continue;
             }
-            long file_size = atol(size_str);
+
+            char *port_str = strtok(NULL, " \n");
+            char *remote_name = strtok(NULL, " \n");
+            char *size_str = strtok(NULL, " \n");
+
+            if (!port_str || !remote_name || !size_str)
+            {
+                printf("bad DATA header from server\n");
+                continue;
+            }
+
+            int  data_port  = atoi(port_str);
+            long file_size  = atol(size_str);
+
+            //create new data socket and connect to <server_ip>:<data_port>
+
+            int data_fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (data_fd < 0)
+            {
+                perror("socket (data)");
+                continue;
+            }
+
+            struct sockaddr_in data_addr;
+            memset(&data_addr, 0, sizeof(data_addr));
+            data_addr.sin_family = AF_INET;
+            data_addr.sin_port   = htons(data_port);
+
+            if (inet_pton(AF_INET, server_ip, &data_addr.sin_addr) <= 0)
+            {
+                perror("inet_pton (data)");
+                close(data_fd);
+                continue;
+            }
+
+            if (connect(data_fd, (struct sockaddr*)&data_addr, sizeof(data_addr)) < 0)
+            {
+                perror("connect (data)");
+                close(data_fd);
+                continue;
+            }
             
             // Create local file
-            FILE *new_file = fopen(argument_one, "wb");
+            remote_name[strcspn(remote_name, "\r\n")] = '\0';
+            char *basename = strrchr(remote_name, '/');
+            if (basename)
+            {
+                basename++;
+            }   
+            else
+            basename = remote_name;
+
+            FILE *new_file = fopen(basename, "wb");
             if (!new_file)
             {
-                printf("Could not create local file: %s\n", argument_one);
+                printf("Could not create local file: %s\n", basename);
                 // Still need to drain the incoming data
                 char drain[4096];
                 long drained = 0;
                 while (drained < file_size)
                 {
                     int to_read = (file_size - drained > 4096) ? 4096 : (file_size - drained);
-                    int r = recv(sock_fd, drain, to_read, 0);
+                    int r = recv(data_fd, drain, to_read, 0);
                     if (r <= 0) break;
                     drained += r;
                 }
+                close(data_fd);
                 continue;
             }
             
@@ -154,7 +202,7 @@ int main(int argc, char *argv[])
                 {
                     bytes_to_read = remaining;
                 }
-                int bytes_recv = recv(sock_fd, file_data, bytes_to_read, 0);
+                int bytes_recv = recv(data_fd, file_data, bytes_to_read, 0);
                 if (bytes_recv <= 0)
                 {
                     printf("Connection error while receiving file\n");
@@ -164,7 +212,16 @@ int main(int argc, char *argv[])
                 current_length += bytes_recv;
             }
             fclose(new_file);
+            close(data_fd);
             printf("Downloaded %s (%ld bytes)\n", argument_one, file_size);
+            
+            n = recv(sock_fd, response, sizeof(response)-1, 0);
+            if (n > 0)
+            {
+                response[n] = '\0';
+                printf("Server: %s", response);
+            }
+            
             continue;
         }
         else if (strcmp(input_command, "PUT") == 0)
@@ -246,5 +303,5 @@ void initialize_server_address(struct sockaddr_in* server_address)
 {
     memset(server_address, 0, sizeof(*server_address));
     server_address->sin_family = AF_INET; //AF_INET = ipv4
-    server_address->sin_port = htons(SERVER_PORT);
+    server_address->sin_port = htons(SERVER_COMMAND_PORT);
 }
