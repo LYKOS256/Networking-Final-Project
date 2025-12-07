@@ -1,0 +1,144 @@
+[2025-12-07 04:09:34] Server started
+[2025-12-07 04:09:46] Client connected, fd=5
+[2025-12-07 04:09:53] Command: LIST  
+[2025-12-07 04:09:53] LIST: .
+[2025-12-07 04:11:15] Command: PUT test.txt 18
+[2025-12-07 04:11:15] PUT success: test.txt (18 bytes)
+[2025-12-07 04:11:16] Command: LIST  
+[2025-12-07 04:11:16] LIST: .
+[2025-12-07 04:11:30] Command: MKDIR ./testdir 
+[2025-12-07 04:11:30] MKDIR: ./testdir
+[2025-12-07 04:11:43] Command: LIST  
+[2025-12-07 04:11:43] LIST: .
+[2025-12-07 04:12:26] Command: GET test.txt 
+[2025-12-07 04:12:26] GET success: test.txt (18 bytes)
+[2025-12-07 04:12:46] Command: DELE test.txt 
+[2025-12-07 04:12:46] DELE: test.txt
+[2025-12-07 04:12:51] Command: LIST  
+[2025-12-07 04:12:51] LIST: .
+[2025-12-07 04:12:58] Command: RMDIR testdir 
+[2025-12-07 04:12:58] RMDIR: testdir
+[2025-12-07 04:13:14] Command: QUIT  
+[2025-12-07 04:13:14] Client requested disconnect
+[2025-12-07 04:21:42] Server started
+[2025-12-07 04:21:48] Server started
+[2025-12-07 04:21:57] Server started
+[2025-12-07 04:22:18] Server started
+[2025-12-07 04:23:11] Server started
+[2025-12-07 04:23:15] Client connected, fd=5
+[2025-12-07 04:23:18] Command: LIST  
+[2025-12-07 04:23:18] LIST: .
+[2025-12-07 04:23:35] Command: MKDIR ./dironserver 
+[2025-12-07 04:23:35] MKDIR: ./dironserver
+[2025-12-07 04:23:55] Command: PUT test.txt 18
+[2025-12-07 04:23:55] PUT success: test.txt (18 bytes)
+[2025-12-07 04:24:05] Command: LIST dironserver 
+[2025-12-07 04:24:05] LIST: dironserver
+[2025-12-07 04:27:34] Server started
+[2025-12-07 04:31:21] Client connected, fd=5
+[2025-12-07 04:31:30] Command: LIST  
+[2025-12-07 04:31:30] LIST: .
+[2025-12-07 04:31:42] Command: RMDIR ./dironserver 
+[2025-12-07 04:31:42] RMDIR: ./dironserver
+[2025-12-07 04:31:44] Command: LIST  
+[2025-12-07 04:31:44] LIST: .
+[2025-12-07 04:31:52] Command: DELE test.txt 
+[2025-12-07 04:31:52] DELE: test.txt
+[2025-12-07 04:31:57] Command: LIST  
+[2025-12-07 04:31:57] LIST: .
+[2025-12-07 04:32:14] Command: GET server.log 
+[2025-12-07 04:32:14] GET success: server.log (1992 bytes)
+[2025-12-07 04:32:25] Command: LIST  
+[2025-12-07 04:32:25] LIST: .
+[2025-12-07 04:32:42] Command: MKDIR dironserver 
+[2025-12-07 04:32:42] MKDIR: dironserver
+[2025-12-07 04:32:57] Command: PUT ./dironserver 18
+[2025-12-07 04:32:57] PUT failed - cannot create: ./dironserver
+[2025-12-07 04:32:57] Command: hello from client
+[2025-12-07 04:33:16] Command: PUT ./dironserver/test.txt 18
+[2025-12-07 04:33:16] PUT success: ./dironserver/test.txt (18 bytes)
+[2025-12-07 04:33:29] Command: LIST  
+[2025-12-07 04:33:29] LIST: .
+[2025-12-07 04:33:32] Command: LISt  
+[2025-12-07 04:33:35] Command: LIST  
+[2025-12-07 04:33:35] LIST: .
+[2025-12-07 04:33:37] Command: LIST  
+[2025-12-07 04:33:37] LIST: .
+[2025-12-07 04:39:29] Client connected, fd=5
+[2025-12-07 04:39:32] Command: LIST  
+[2025-12-07 04:39:32] LIST: .
+[2025-12-07 04:39:41] Command: LIST  
+[2025-12-07 04:39:41] LIST: .
+[2025-12-07 04:39:50] Command: MKDIR dironserver 
+[2025-12-07 04:39:50] MKDIR: dironserver
+[2025-12-07 04:39:52] Command: LIST  
+[2025-12-07 04:39:52] LIST: .
+[2025-12-07 04:40:02] Command: PUT ./dironserver/test.txt 18
+[2025-12-07 04:40:02] PUT success: ./dironserver/test.txt (18 bytes)
+[2025-12-07 04:40:08] Command: LIST  
+[2025-12-07 04:40:08] LIST: .
+[2025-12-07 04:40:19] Command: LIST ./dironServer 
+[2025-12-07 04:40:28] Command: LIST ./dironserver 
+[2025-12-07 04:40:28] LIST: ./dironserver
+[2025-12-07 04:46:14] Command: QUIT  
+[2025-12-07 04:46:14] Client requested disconnect
+[2025-12-07 04:46:44] Server started
+[2025-12-07 04:46:58] Server started
+[2025-12-07 04:47:18] Server started
+[2025-12-07 04:47:36] Server started
+[2025-12-07 04:47:50] Server started
+[2025-12-07 04:47:54] Server started
+[2025-12-07 05:02:38] Server started
+[2025-12-07 05:02:45] Client connected, fd=5
+[2025-12-07 05:03:05] Client connected, fd=5
+[2025-12-07 05:03:11] Command: LIST  
+[2025-12-07 05:03:11] LIST: .
+[2025-12-07 05:03:15] Command: LIST  
+[2025-12-07 05:03:15] LIST: .
+[2025-12-07 05:03:20] Command: PUT test.txt 18
+[2025-12-07 05:03:20] PUT success: test.txt (18 bytes)
+[2025-12-07 05:03:23] Command: LIST  
+[2025-12-07 05:03:23] LIST: .
+[2025-12-07 05:03:31] Command: DELE test.txt 
+[2025-12-07 05:03:31] DELE: test.txt
+[2025-12-07 05:03:33] Command: LIST  
+[2025-12-07 05:03:33] LIST: .
+[2025-12-07 05:03:36] Command: LIST  
+[2025-12-07 05:03:36] LIST: .
+[2025-12-07 05:04:05] Command: PING  
+[2025-12-07 05:04:07] Command: QUIT  
+[2025-12-07 05:04:07] Client requested disconnect
+[2025-12-07 05:04:10] Client connected, fd=5
+[2025-12-07 05:04:14] Command: QUIT  
+[2025-12-07 05:04:14] Client requested disconnect
+[2025-12-07 05:04:18] Command: QUIT  
+[2025-12-07 05:04:18] Client requested disconnect
+[2025-12-07 05:07:52] Server started
+[2025-12-07 05:08:18] Client connected, fd=5
+[2025-12-07 05:08:27] Command: AUTH admin password
+[2025-12-07 05:08:27] AUTH OK for user: admin
+[2025-12-07 05:08:31] Command: LIST  
+[2025-12-07 05:08:31] LIST: .
+[2025-12-07 05:08:50] Client connected, fd=5
+[2025-12-07 05:08:57] Command: AUTH user user123
+[2025-12-07 05:08:57] AUTH OK for user: user
+[2025-12-07 05:09:07] Command: PING  
+[2025-12-07 05:09:10] Command: LIST  
+[2025-12-07 05:09:10] LIST: .
+[2025-12-07 05:09:30] Client connected, fd=5
+[2025-12-07 05:09:33] Command: PING  
+[2025-12-07 05:09:35] Command: LIST  
+[2025-12-07 05:09:35] LIST denied - not authenticated
+[2025-12-07 05:18:48] Server started
+[2025-12-07 05:19:05] Client connected, fd=5
+[2025-12-07 05:19:49] Client connected, fd=5
+[2025-12-07 05:24:42] Server started
+[2025-12-07 05:24:50] Client connected, fd=5
+[2025-12-07 05:26:12] Server started
+[2025-12-07 05:26:19] Client connected, fd=5
+[2025-12-07 05:26:22] Command: LIST  
+[2025-12-07 05:26:22] LIST: .
+[2025-12-07 05:27:09] Server started
+[2025-12-07 05:27:11] Client connected, fd=5
+[2025-12-07 05:27:13] Command: LIST  
+[2025-12-07 05:27:13] LIST: .
