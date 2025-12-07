@@ -385,6 +385,64 @@ void handle_client(int client_fd)
                 continue;
             }
             int file_length = atoi(argument_two);
+            int data_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (data_listen_fd < 0)
+            {
+                perror("socket(data PUT)");
+                fclose(new_file);
+                const char *resp = "ERROR: cannot open data socket\n";
+                send(client_fd, resp, strlen(resp), 0);
+                continue;
+            }
+            struct sockaddr_in data_address;
+            initialize_server_address(&data_address);
+            data_address.sin_port = htons(0);
+            const struct sockaddr *const_data_address = (const struct sockaddr *)&data_address;
+
+            if (bind(data_listen_fd, const_data_address, sizeof(data_address)) < 0)
+            {
+                perror("bind(data PUT) failed");
+                close(data_listen_fd);
+                fclose(new_file);
+                const char *resp = "ERROR: cannot bind data socket\n";
+                send(client_fd, resp, strlen(resp), 0);
+                continue;
+            }
+
+            if (listen(data_listen_fd, 1) < 0)
+            {
+                perror("listen(data PUT) failed");
+                close(data_listen_fd);
+                fclose(new_file);
+                const char *resp = "ERROR: cannot listen on data socket\n";
+                send(client_fd, resp, strlen(resp), 0);
+                continue;
+            }
+            socklen_t addrlen = sizeof(data_address);
+            if (getsockname(data_listen_fd, (struct sockaddr *)&data_address, &addrlen) < 0)
+            {
+                perror("getsockname(data PUT)");
+                close(data_listen_fd);
+                fclose(new_file);
+                const char *resp = "ERROR: getsockname failed\n";
+                send(client_fd, resp, strlen(resp), 0);
+                continue;
+            }
+            int assigned_port = ntohs(data_address.sin_port);
+            char header[256];
+            snprintf(header, sizeof(header), "DATA %d %s %ld\n", assigned_port, argument_one, file_length);
+            send(client_fd, header, strlen(header), 0);
+            int data_fd = accept(data_listen_fd, NULL, NULL);
+            if (data_fd < 0)
+            {
+                perror("accept(data PUT)");
+                close(data_listen_fd);
+                fclose(new_file);
+                const char *resp = "ERROR: cannot accept data connection\n";
+                send(client_fd, resp, strlen(resp), 0);
+                continue;
+            }
+            close(data_listen_fd);
             int buffer_size = 4096;
             char file_data[buffer_size];
             int current_length = 0;
@@ -392,7 +450,7 @@ void handle_client(int client_fd)
             {
                 int remaining_bytes = file_length - current_length;
                 int to_read = (remaining_bytes < buffer_size) ? remaining_bytes : buffer_size;
-                int bytes_read = recv(client_fd, file_data, to_read, 0);
+                int bytes_read = recv(data_fd, file_data, to_read, 0);
                 if (bytes_read <= 0)
                 {
                     break;
@@ -400,6 +458,7 @@ void handle_client(int client_fd)
                 fwrite(file_data, sizeof(char), bytes_read, new_file);
                 current_length = current_length + bytes_read;
             }
+            close(data_fd);
             fclose(new_file);
             const char *resp = "PUT OK\n";
             send(client_fd, resp, strlen(resp), 0);

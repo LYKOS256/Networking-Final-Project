@@ -229,7 +229,6 @@ int main(int argc, char *argv[])
             // Support destination path: PUT <src> <dest>
             const char *src_path = argument_one;
             const char *dest_path = argument_two ? argument_two : argument_one;
-
             FILE* file_added = fopen(src_path, "rb");
             if (!file_added)
             {
@@ -239,16 +238,73 @@ int main(int argc, char *argv[])
             //fseek and ftell used here to determine file size
             fseek(file_added, 0, SEEK_END);
             long file_size = ftell(file_added);
+            fseek(file_added, 0, SEEK_SET);
             //converting file size into a string
             char file_size_string[32];
             sprintf(file_size_string, "%ld", file_size);
             //sending the input data but with the file size attached
             char send_data[strlen(input_command) + strlen(dest_path) + strlen(file_size_string) + 3];
             sprintf(send_data, "%s %s %s\n", input_command, dest_path, file_size_string);
-            send(sock_fd, send_data, strlen(send_data), 0); //TODO: add error handling here
+            if (send(sock_fd, send_data, strlen(send_data), 0) < 0)
+            {
+                perror("send PUT header");
+                fclose(file_added);
+                break;
+            }
+            ssize_t n = recv(sock_fd, response, sizeof(response)-1, 0);
+            if (n <= 0)
+            {
+                printf("Connection closed by server or error (PUT DATA)\n");
+                fclose(file_added);
+                break;
+            }
+            response[n] = '\0';
+            if (strncmp(response, "DATA", 4) != 0)
+            {
+                printf("Server: %s", response);
+                fclose(file_added);
+                continue;
+            }
+
+            char header_copy[1024];
+            strncpy(header_copy, response, sizeof(header_copy));
+            header_copy[sizeof(header_copy)-1] = '\0';
+
+            char *tok      = strtok(header_copy, " \n");  // "DATA"
+            char *port_str = strtok(NULL,       " \n");   // port
+            int data_port  = atoi(port_str);
+
+            //Create and connect the data socket
+            int data_fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (data_fd < 0)
+            {
+                perror("socket (PUT data)");
+                fclose(file_added);
+                continue;
+            }
+
+            struct sockaddr_in data_addr;
+            memset(&data_addr, 0, sizeof(data_addr));
+            data_addr.sin_family = AF_INET;
+            data_addr.sin_port   = htons(data_port);
+            if (inet_pton(AF_INET, server_ip, &data_addr.sin_addr) <= 0)
+            {
+                perror("inet_pton (PUT data)");
+                close(data_fd);
+                fclose(file_added);
+                continue;
+            }
+
+            if (connect(data_fd, (struct sockaddr*)&data_addr, sizeof(data_addr)) < 0)
+            {
+                perror("connect (PUT data)");
+                close(data_fd);
+                fclose(file_added);
+                continue;
+            }
+
             int buffer_size = 4096;
             char file_data[buffer_size];
-            fseek(file_added, 0, SEEK_SET);
             int current_length = 0;
             while(current_length < file_size)
             {
@@ -259,7 +315,7 @@ int main(int argc, char *argv[])
                     bytes_to_read = remaining_bytes;
                 }
                 size_t bytes_read = fread(file_data, sizeof(char), bytes_to_read, file_added);
-                int bytes_sent = send(sock_fd, file_data, bytes_read, 0);
+                int bytes_sent = send(data_fd, file_data, bytes_read, 0);
                 if (bytes_sent <= 0)
                 {
                     //TODO: implement error handling
@@ -267,12 +323,11 @@ int main(int argc, char *argv[])
                 current_length = current_length + bytes_read;
             }
             fclose(file_added);
-            
-            // Wait for server response after PUT
-            ssize_t n = recv(sock_fd, response, sizeof(response)-1, 0);
+            close(data_fd);
+            n = recv(sock_fd, response, sizeof(response)-1, 0);
             if (n <= 0)
             {
-                printf("Connection closed by server or error\n");
+                printf("Connection closed by server or error (PUT final)\n");
                 break;
             }
             response[n] = '\0';

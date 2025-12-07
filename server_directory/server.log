@@ -142,3 +142,7 @@
 [2025-12-07 05:27:11] Client connected, fd=5
 [2025-12-07 05:27:13] Command: LIST  
 [2025-12-07 05:27:13] LIST: .
+[2025-12-07 10:53:43] Server started
+[2025-12-07 10:53:54] Client connected, fd=5
+[2025-12-07 10:54:01] Command: PUT test.txt 18
+[2025-12-07 10:54:01] PUT success: test.txt (18 bytes)
