@@ -9,6 +9,8 @@
 #include <dirent.h>
 #include <time.h>
 #include <limits.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -24,8 +26,8 @@
 FILE *log_fp = NULL;
 
 void initialize_server_address(struct sockaddr_in* server_address);
-ssize_t recv_line(int fd, char *buf, size_t max_len);
-void handle_client(int client_fd);
+ssize_t recv_line(int fd, SSL* ssl, char *buf, size_t max_len);
+void handle_client(int client_fd, SSL* ssl);
 void server_log(const char *format, ...);
 int is_path_safe(const char *path);
 
@@ -40,8 +42,31 @@ int main(void)
         log_fp = stderr; // Fall back to stderr
     }
     server_log("Server started");
-    
     printf("Server started\n");
+    SSL_load_error_strings();
+    OpenSSL_add_ssl_algorithms();
+    const SSL_METHOD *method = TLS_server_method();
+    SSL_CTX *server_ctx = SSL_CTX_new(method);
+    if (!server_ctx)
+    {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    if (SSL_CTX_use_certificate_file(server_ctx, "server.crt", SSL_FILETYPE_PEM) <= 0)
+    {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    if (SSL_CTX_use_PrivateKey_file(server_ctx, "server.key", SSL_FILETYPE_PEM) <= 0)
+    {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    if (!SSL_CTX_check_private_key(server_ctx))
+    {
+        fprintf(stderr, "Private key does not match the public key\n");
+        exit(EXIT_FAILURE);
+    }
     //AF_INET = IPv4
     //SOCK_STREAM = TCP
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -76,7 +101,6 @@ int main(void)
         struct sockaddr_in client_address;
         socklen_t client_len = sizeof(client_address);
         struct sockaddr* generic_client_address = (struct sockaddr*) &client_address;
-        //accept() takes a client out of the queue to listen
         int client_fd = accept(listen_fd, generic_client_address, &client_len);
         if (client_fd < 0)
         {
@@ -85,14 +109,40 @@ int main(void)
             exit(EXIT_FAILURE);
         }
         printf("Client connected, fd = %d\n", client_fd);
-        
-        handle_client(client_fd);
-
+        SSL *ssl = SSL_new(server_ctx);
+        if (!ssl)
+        {
+            fprintf(stderr, "SSL_new failed\n");
+            close(client_fd);
+            continue;
+        }
+        if (!SSL_set_fd(ssl, client_fd))
+        {
+            fprintf(stderr, "SSL_set_fd failed\n");
+            ERR_print_errors_fp(stderr);
+            SSL_free(ssl);
+            close(client_fd);
+            continue;
+        }
+        // TLS handshake
+        if (SSL_accept(ssl) <= 0)
+        {
+            fprintf(stderr, "SSL_accept failed\n");
+            ERR_print_errors_fp(stderr);
+            SSL_free(ssl);
+            close(client_fd);
+            continue;
+        }
+        printf("TLS handshake completed (server)\n");
+        handle_client(client_fd, ssl);
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
         close(client_fd);
         printf("Client disconnected, fd = %d\n", client_fd);
     }
 
     close(listen_fd);
+    SSL_CTX_free(server_ctx);
     return 0;
 }
 
@@ -138,13 +188,13 @@ int is_path_safe(const char *path)
     return 1;
 }
 
-ssize_t recv_line(int fd, char *buf, size_t max_len)
+ssize_t recv_line(int fd, SSL* ssl, char *buf, size_t max_len)
 {
     size_t i = 0;
     while (i < max_len-1)
     {
         char c;
-        ssize_t n = recv(fd, &c, 1, 0);
+        ssize_t n = SSL_read(ssl, &c, 1);
         if (n < 0)
         {
             if (errno == EINTR){
@@ -171,18 +221,18 @@ ssize_t recv_line(int fd, char *buf, size_t max_len)
     return (ssize_t)i;
 }
 
-void handle_client(int client_fd)
+void handle_client(int client_fd, SSL *ssl)
 {
     char cmd[MAX_CMD_LEN];
     server_log("Client connected, fd=%d", client_fd);
     
     // Send welcome message to client
     const char *welcome = "Welcome to FTP Server\n";
-    send(client_fd, welcome, strlen(welcome), 0);
+    SSL_write(ssl, welcome, strlen(welcome));
     
     while (1)
     {
-        ssize_t n = recv_line(client_fd, cmd, MAX_CMD_LEN);
+        ssize_t n = recv_line(client_fd, ssl, cmd, MAX_CMD_LEN);
         char* command = strtok(cmd, " \n");
         char* argument_one = strtok(NULL, " \n");
         char* argument_two = strtok(NULL, " \n");
@@ -199,19 +249,16 @@ void handle_client(int client_fd)
         }
 
         printf("Received command: %s\n", cmd);
-        server_log("Command: %s %s %s", command, 
-                   argument_one ? argument_one : "", 
-                   argument_two ? argument_two : "");
-
+        server_log("Command: %s %s %s", command, argument_one ? argument_one : "", argument_two ? argument_two : "");
         if (strcmp(command, "PING") == 0)
         {
             const char *resp = "PONG\n";
-            send(client_fd, resp, strlen(resp), 0);
+            SSL_write(ssl, resp, strlen(resp));
         }
         else if (strcmp(command, "QUIT") == 0)
         {
             const char * resp = "Goodbye!\n";
-            send(client_fd, resp, strlen(resp), 0);
+            SSL_write(ssl, resp, strlen(resp));
             printf("Closing connection on client request\n");
             server_log("Client requested disconnect");
             break;
@@ -224,13 +271,13 @@ void handle_client(int client_fd)
                 strcmp(argument_two, "password") == 0)
             {
                 const char *resp = "AUTH OK\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 server_log("AUTH OK for user: %s", argument_one);
             }
             else
             {
                 const char *resp = "AUTH FAILED\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 server_log("AUTH FAILED for user: %s", argument_one ? argument_one : "NULL");
             }
         }
@@ -240,7 +287,7 @@ void handle_client(int client_fd)
             if (!is_path_safe(argument_one))
             {
                 const char *resp = "ERROR: Invalid path\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 server_log("GET blocked - unsafe path: %s", argument_one ? argument_one : "NULL");
                 continue;
             }
@@ -250,7 +297,7 @@ void handle_client(int client_fd)
             if (!file_added)
             {
                 const char *resp = "ERROR: File not found\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 server_log("GET failed - file not found: %s", argument_one);
                 continue;
             }
@@ -302,7 +349,7 @@ void handle_client(int client_fd)
             int assigned_port = ntohs(data_address.sin_port);
             char header[256];
             snprintf(header, sizeof(header), "DATA %d %s %ld\n", assigned_port, argument_one, file_size);
-            send(client_fd, header, strlen(header), 0);
+            SSL_write(ssl, header, strlen(header));
 
             int data_fd = accept(data_listen_fd, NULL, NULL);
             if ((data_fd < 0))
@@ -350,7 +397,7 @@ void handle_client(int client_fd)
             close(data_fd);
             
             const char *resp = "GET OK\n";
-            send(client_fd, resp, strlen(resp), 0);
+            SSL_write(ssl, resp, strlen(resp));
 
             server_log("GET success: %s (%ld bytes)", argument_one, file_size);
         }
@@ -360,7 +407,7 @@ void handle_client(int client_fd)
             if (!is_path_safe(argument_one))
             {
                 const char *resp = "ERROR: Invalid path\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 server_log("PUT blocked - unsafe path: %s", argument_one ? argument_one : "NULL");
                 // Drain the incoming file data
                 int file_length = atoi(argument_two ? argument_two : "0");
@@ -369,7 +416,7 @@ void handle_client(int client_fd)
                 while (drained < file_length)
                 {
                     int to_read = (file_length - drained > 4096) ? 4096 : (file_length - drained);
-                    int r = recv(client_fd, drain, to_read, 0);
+                    int r = SSL_read(ssl, drain, to_read);
                     if (r <= 0) break;
                     drained += r;
                 }
@@ -380,7 +427,7 @@ void handle_client(int client_fd)
             if (!new_file)
             {
                 const char *resp = "ERROR: Cannot create file\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 server_log("PUT failed - cannot create: %s", argument_one);
                 continue;
             }
@@ -391,7 +438,7 @@ void handle_client(int client_fd)
                 perror("socket(data PUT)");
                 fclose(new_file);
                 const char *resp = "ERROR: cannot open data socket\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 continue;
             }
             struct sockaddr_in data_address;
@@ -405,7 +452,7 @@ void handle_client(int client_fd)
                 close(data_listen_fd);
                 fclose(new_file);
                 const char *resp = "ERROR: cannot bind data socket\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 continue;
             }
 
@@ -415,7 +462,7 @@ void handle_client(int client_fd)
                 close(data_listen_fd);
                 fclose(new_file);
                 const char *resp = "ERROR: cannot listen on data socket\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 continue;
             }
             socklen_t addrlen = sizeof(data_address);
@@ -425,13 +472,13 @@ void handle_client(int client_fd)
                 close(data_listen_fd);
                 fclose(new_file);
                 const char *resp = "ERROR: getsockname failed\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 continue;
             }
             int assigned_port = ntohs(data_address.sin_port);
             char header[256];
             snprintf(header, sizeof(header), "DATA %d %s %ld\n", assigned_port, argument_one, file_length);
-            send(client_fd, header, strlen(header), 0);
+            SSL_write(ssl, header, strlen(header));
             int data_fd = accept(data_listen_fd, NULL, NULL);
             if (data_fd < 0)
             {
@@ -439,7 +486,7 @@ void handle_client(int client_fd)
                 close(data_listen_fd);
                 fclose(new_file);
                 const char *resp = "ERROR: cannot accept data connection\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 continue;
             }
             close(data_listen_fd);
@@ -461,7 +508,7 @@ void handle_client(int client_fd)
             close(data_fd);
             fclose(new_file);
             const char *resp = "PUT OK\n";
-            send(client_fd, resp, strlen(resp), 0);
+            SSL_write(ssl, resp, strlen(resp));
             server_log("PUT success: %s (%d bytes)", argument_one, file_length);
         }
         else if (strcmp(command, "LIST") == 0)
@@ -471,7 +518,7 @@ void handle_client(int client_fd)
             if (!is_path_safe(path) && strcmp(path, ".") != 0)
             {
                 const char *resp = "ERROR: Invalid path\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 server_log("LIST blocked - unsafe path: %s", path);
                 continue;
             }
@@ -481,7 +528,7 @@ void handle_client(int client_fd)
             {
                 char resp[256];
                 snprintf(resp, sizeof(resp), "ERROR: Cannot open directory: %s\n", strerror(errno));
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 continue;
             }
             
@@ -515,7 +562,7 @@ void handle_client(int client_fd)
             {
                 strcpy(listing, "(empty directory)\n");
             }
-            send(client_fd, listing, strlen(listing), 0);
+            SSL_write(ssl, listing, strlen(listing));
             server_log("LIST: %s", path);
         }
         else if (strcmp(command, "PWD") == 0)
@@ -525,12 +572,12 @@ void handle_client(int client_fd)
             {
                 char resp[PATH_MAX + 16];
                 snprintf(resp, sizeof(resp), "%s\n", cwd);
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
             }
             else
             {
                 const char *resp = "ERROR: Cannot get current directory\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
             }
         }
         else if (strcmp(command, "CWD") == 0)
@@ -538,7 +585,7 @@ void handle_client(int client_fd)
             if (!is_path_safe(argument_one))
             {
                 const char *resp = "ERROR: Invalid path\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 server_log("CWD blocked - unsafe path: %s", argument_one ? argument_one : "NULL");
                 continue;
             }
@@ -546,14 +593,14 @@ void handle_client(int client_fd)
             if (chdir(argument_one) == 0)
             {
                 const char *resp = "CWD OK\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 server_log("CWD: %s", argument_one);
             }
             else
             {
                 char resp[256];
                 snprintf(resp, sizeof(resp), "CWD FAILED: %s\n", strerror(errno));
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
             }
         }
         else if (strcmp(command, "DELE") == 0)
@@ -561,7 +608,7 @@ void handle_client(int client_fd)
             if (!is_path_safe(argument_one))
             {
                 const char *resp = "ERROR: Invalid path\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 server_log("DELE blocked - unsafe path: %s", argument_one ? argument_one : "NULL");
                 continue;
             }
@@ -569,14 +616,14 @@ void handle_client(int client_fd)
             if (unlink(argument_one) == 0)
             {
                 const char *resp = "DELE OK\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 server_log("DELE: %s", argument_one);
             }
             else
             {
                 char resp[256];
                 snprintf(resp, sizeof(resp), "DELE FAILED: %s\n", strerror(errno));
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
             }
         }
         else if (strcmp(command, "MKDIR") == 0)
@@ -585,20 +632,20 @@ void handle_client(int client_fd)
             if (!is_path_safe(argument_one))
             {
                 const char *resp = "ERROR: Invalid path\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 server_log("MKDIR blocked - unsafe path: %s", argument_one ? argument_one : "NULL");
             }
             else if (mkdir(argument_one, 0755) == 0)
             {
                 const char *resp = "MKDIR OK\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 server_log("MKDIR: %s", argument_one);
             }
             else
             {
                 char resp[256];
                 snprintf(resp, sizeof(resp), "MKDIR FAILED: %s\n", strerror(errno));
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
             }
         }
         else if (strcmp(command, "RMDIR") == 0)
@@ -606,27 +653,27 @@ void handle_client(int client_fd)
             if (!is_path_safe(argument_one))
             {
                 const char *resp = "ERROR: Invalid path\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 server_log("RMDIR blocked - unsafe path: %s", argument_one ? argument_one : "NULL");
             }
             else if (rmdir(argument_one) == 0)
             {
                 const char *resp = "RMDIR OK\n";
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
                 server_log("RMDIR: %s", argument_one);
             }
             else
             {
                 char resp[256];
                 snprintf(resp, sizeof(resp), "RMDIR FAILED: %s\n", strerror(errno));
-                send(client_fd, resp, strlen(resp), 0);
+                SSL_write(ssl, resp, strlen(resp));
             }
         }
         else
         {
             //unrecognized command name
             const char *resp = "ERROR: unrecognized command\n";
-            send(client_fd, resp, strlen(resp), 0);
+            SSL_write(ssl, resp, strlen(resp));
         }
     }
     

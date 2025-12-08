@@ -4,10 +4,14 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #define SERVER_COMMAND_PORT 5000  //matches server's listening port
 
 void initialize_server_address(struct sockaddr_in* server_address);
+void init_openssl_client();
+SSL_CTX *create_client_ctx();
 
 int main(int argc, char *argv[])
 {
@@ -39,19 +43,39 @@ int main(int argc, char *argv[])
 
     printf("Server address prepared\n");
     struct sockaddr* generic_server_address = (struct sockaddr*)&server_address;
-    //connect() connects socket to server
     if (connect(sock_fd, generic_server_address, sizeof(server_address)) < 0)
     {
         perror("connect");
         close(sock_fd);
         exit(EXIT_FAILURE);
     }
-
+    init_openssl_client();
+    SSL_CTX *ctx = create_client_ctx();
+    SSL *ssl = SSL_new(ctx);
+    if (!ssl)
+    {
+        fprintf(stderr, "SSL_new failed\n");
+        close(sock_fd);
+        SSL_CTX_free(ctx);
+        exit(EXIT_FAILURE);
+    }
+    // Attaches SSL to existing TCP socket
+    SSL_set_fd(ssl, sock_fd);
+    //TLS handshake
+    if (SSL_connect(ssl) <= 0)
+    {
+        fprintf(stderr, "SSL_connect failed\n");
+        ERR_print_errors_fp(stderr);
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        close(sock_fd);
+        exit(EXIT_FAILURE);
+    }
     printf("Connected to server %s:%d\n", server_ip, SERVER_COMMAND_PORT);
     
     // Receive and display server welcome message
     char welcome[1024];
-    ssize_t w = recv(sock_fd, welcome, sizeof(welcome)-1, 0);
+    ssize_t w = SSL_read(ssl, welcome, sizeof(welcome)-1);
     if (w > 0)
     {
         welcome[w] = '\0';
@@ -76,12 +100,12 @@ int main(int argc, char *argv[])
         char* argument_two = strtok(NULL, " \n");
         if (strcmp(input_command, "QUIT") == 0)
         {
-            if (send(sock_fd, input, strlen(input), 0) < 0)
+            if (SSL_write(ssl, input, strlen(input)) < 0)
             {
                 perror("send");
                 break;
             }
-            ssize_t n = recv(sock_fd, response, sizeof(response)-1, 0);
+            ssize_t n = SSL_read(ssl, response, sizeof(response)-1);
             if (n > 0)
             {
                 response[n] = '\0';
@@ -93,13 +117,13 @@ int main(int argc, char *argv[])
         else if (strcmp(input_command, "GET") == 0)
         {
             // Send GET command to server
-            if (send(sock_fd, input, strlen(input), 0) < 0)
+            if (SSL_write(ssl, input, strlen(input)) < 0)
             {
                 perror("send");
                 break;
             }
             // First receive the header: filename size or ERROR
-            ssize_t n = recv(sock_fd, response, sizeof(response)-1, 0);
+            ssize_t n = SSL_read(ssl, response, sizeof(response)-1);
             if (n <= 0)
             {
                 printf("Connection closed by server or error\n");
@@ -215,7 +239,7 @@ int main(int argc, char *argv[])
             close(data_fd);
             printf("Downloaded %s (%ld bytes)\n", argument_one, file_size);
             
-            n = recv(sock_fd, response, sizeof(response)-1, 0);
+            n = SSL_read(ssl, response, sizeof(response)-1);
             if (n > 0)
             {
                 response[n] = '\0';
@@ -245,13 +269,13 @@ int main(int argc, char *argv[])
             //sending the input data but with the file size attached
             char send_data[strlen(input_command) + strlen(dest_path) + strlen(file_size_string) + 3];
             sprintf(send_data, "%s %s %s\n", input_command, dest_path, file_size_string);
-            if (send(sock_fd, send_data, strlen(send_data), 0) < 0)
+            if (SSL_write(ssl, send_data, strlen(send_data)) < 0)
             {
                 perror("send PUT header");
                 fclose(file_added);
                 break;
             }
-            ssize_t n = recv(sock_fd, response, sizeof(response)-1, 0);
+            ssize_t n = SSL_read(ssl, response, sizeof(response)-1);
             if (n <= 0)
             {
                 printf("Connection closed by server or error (PUT DATA)\n");
@@ -324,7 +348,7 @@ int main(int argc, char *argv[])
             }
             fclose(file_added);
             close(data_fd);
-            n = recv(sock_fd, response, sizeof(response)-1, 0);
+            n = SSL_read(ssl, response, sizeof(response)-1);
             if (n <= 0)
             {
                 printf("Connection closed by server or error (PUT final)\n");
@@ -334,22 +358,27 @@ int main(int argc, char *argv[])
             printf("Server: %s", response);
             continue;
         }
-        else if (send(sock_fd, input, strlen(input), 0) < 0)
+        else
         {
-            perror("send");
-            break;
+            if (SSL_write(ssl, input, strlen(input)) <= 0)
+            {
+                fprintf(stderr, "SSL_write failed\n");
+                ERR_print_errors_fp(stderr);
+                break;
+            }
+            int n = SSL_read(ssl, response, sizeof(response) - 1);
+            if (n <= 0)
+            {
+                printf("Connection closed by server or error\n");
+                break;
+            }
+            response[n] = '\0';
+            printf("Server: %s", response);
         }
-        ssize_t n = recv(sock_fd, response, sizeof(response)-1, 0);
-        if (n <= 0)
-        {
-            printf("Connection closed by server or error\n");
-            break;
-        }
-        response[n] = '\0';
-        printf("Server: %s", response);
     }
-
-
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    SSL_CTX_free(ctx);
     close(sock_fd);
     return 0;
 }
@@ -359,4 +388,22 @@ void initialize_server_address(struct sockaddr_in* server_address)
     memset(server_address, 0, sizeof(*server_address));
     server_address->sin_family = AF_INET; //AF_INET = ipv4
     server_address->sin_port = htons(SERVER_COMMAND_PORT);
+}
+
+void init_openssl_client()
+{
+    SSL_load_error_strings();
+    OpenSSL_add_ssl_algorithms();
+}
+
+SSL_CTX *create_client_ctx()
+{
+    const SSL_METHOD *method = TLS_client_method();
+    SSL_CTX *ctx = SSL_CTX_new(method);
+    if (!ctx)
+    {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    return ctx;
 }

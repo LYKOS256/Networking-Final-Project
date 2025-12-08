@@ -10,12 +10,12 @@ for me)
 
 Compiling instructions (from ./Networking-Final-Project):
     cd ..
-    gcc -o server server.c
+    gcc server.c -o server -lcrypto -lssl
     cd ./server_directory.c
     ../server
 
     cd ..
-    gcc -o client client.c
+    gcc client.c -o client -lcrypto -lssl
     cd ./client_directory/
     ../client 127.0.0.1
 
