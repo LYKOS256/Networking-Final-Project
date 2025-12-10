@@ -6,6 +6,8 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <dirent.h>
 #include <time.h>
 #include <limits.h>
@@ -32,6 +34,9 @@ void server_log(const char *format, ...);
 int is_path_safe(const char *path);
 
 
+// Global SSL context for data connections
+SSL_CTX *data_ctx = NULL;
+
 int main(void)
 {
     // Open log file
@@ -52,12 +57,12 @@ int main(void)
         ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);
     }
-    if (SSL_CTX_use_certificate_file(server_ctx, "server.crt", SSL_FILETYPE_PEM) <= 0)
+    if (SSL_CTX_use_certificate_file(server_ctx, "../server.crt", SSL_FILETYPE_PEM) <= 0)
     {
         ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);
     }
-    if (SSL_CTX_use_PrivateKey_file(server_ctx, "server.key", SSL_FILETYPE_PEM) <= 0)
+    if (SSL_CTX_use_PrivateKey_file(server_ctx, "../server.key", SSL_FILETYPE_PEM) <= 0)
     {
         ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);
@@ -67,6 +72,25 @@ int main(void)
         fprintf(stderr, "Private key does not match the public key\n");
         exit(EXIT_FAILURE);
     }
+    
+    // Create SSL context for data connections (uses same certs)
+    data_ctx = SSL_CTX_new(TLS_server_method());
+    if (!data_ctx)
+    {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    if (SSL_CTX_use_certificate_file(data_ctx, "../server.crt", SSL_FILETYPE_PEM) <= 0)
+    {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    if (SSL_CTX_use_PrivateKey_file(data_ctx, "../server.key", SSL_FILETYPE_PEM) <= 0)
+    {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    
     //AF_INET = IPv4
     //SOCK_STREAM = TCP
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -96,6 +120,9 @@ int main(void)
     }
     printf("Server listening to port %d\n", LISTEN_PORT_COMMAND);
 
+    // Signal handler to reap zombie child processes
+    signal(SIGCHLD, SIG_IGN);
+
     while (1)
     {
         struct sockaddr_in client_address;
@@ -105,44 +132,67 @@ int main(void)
         if (client_fd < 0)
         {
             perror("accept");
-            close(listen_fd);
-            exit(EXIT_FAILURE);
+            continue;  // Don't exit, just continue accepting
         }
         printf("Client connected, fd = %d\n", client_fd);
-        SSL *ssl = SSL_new(server_ctx);
-        if (!ssl)
+        
+        // Fork a child process to handle this client
+        pid_t pid = fork();
+        if (pid < 0)
         {
-            fprintf(stderr, "SSL_new failed\n");
+            perror("fork");
             close(client_fd);
             continue;
         }
-        if (!SSL_set_fd(ssl, client_fd))
+        
+        if (pid == 0)
         {
-            fprintf(stderr, "SSL_set_fd failed\n");
-            ERR_print_errors_fp(stderr);
+            // Child process - handle the client
+            close(listen_fd);  // Child doesn't need the listening socket
+            
+            SSL *ssl = SSL_new(server_ctx);
+            if (!ssl)
+            {
+                fprintf(stderr, "SSL_new failed\n");
+                close(client_fd);
+                exit(EXIT_FAILURE);
+            }
+            if (!SSL_set_fd(ssl, client_fd))
+            {
+                fprintf(stderr, "SSL_set_fd failed\n");
+                ERR_print_errors_fp(stderr);
+                SSL_free(ssl);
+                close(client_fd);
+                exit(EXIT_FAILURE);
+            }
+            // TLS handshake
+            if (SSL_accept(ssl) <= 0)
+            {
+                fprintf(stderr, "SSL_accept failed\n");
+                ERR_print_errors_fp(stderr);
+                SSL_free(ssl);
+                close(client_fd);
+                exit(EXIT_FAILURE);
+            }
+            printf("TLS handshake completed (server, pid=%d)\n", getpid());
+            handle_client(client_fd, ssl);
+            SSL_shutdown(ssl);
             SSL_free(ssl);
             close(client_fd);
-            continue;
+            printf("Client disconnected, fd = %d (pid=%d)\n", client_fd, getpid());
+            exit(EXIT_SUCCESS);  // Child exits after handling client
         }
-        // TLS handshake
-        if (SSL_accept(ssl) <= 0)
+        else
         {
-            fprintf(stderr, "SSL_accept failed\n");
-            ERR_print_errors_fp(stderr);
-            SSL_free(ssl);
+            // Parent process - close client fd and continue accepting
             close(client_fd);
-            continue;
+            printf("Spawned child process %d for client\n", pid);
         }
-        printf("TLS handshake completed (server)\n");
-        handle_client(client_fd, ssl);
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
-        close(client_fd);
-        printf("Client disconnected, fd = %d\n", client_fd);
     }
 
     close(listen_fd);
     SSL_CTX_free(server_ctx);
+    SSL_CTX_free(data_ctx);
     return 0;
 }
 
@@ -361,6 +411,26 @@ void handle_client(int client_fd, SSL *ssl)
             }
             close(data_listen_fd);
             
+            // Set up TLS on data channel
+            SSL *data_ssl = SSL_new(data_ctx);
+            if (!data_ssl)
+            {
+                fprintf(stderr, "SSL_new failed for data channel\n");
+                close(data_fd);
+                fclose(file_added);
+                continue;
+            }
+            SSL_set_fd(data_ssl, data_fd);
+            if (SSL_accept(data_ssl) <= 0)
+            {
+                fprintf(stderr, "SSL_accept failed for data channel\n");
+                ERR_print_errors_fp(stderr);
+                SSL_free(data_ssl);
+                close(data_fd);
+                fclose(file_added);
+                continue;
+            }
+            
             //Sending file contents over new data connection
             int buffer_size = 4096;                                             
             char file_data[4096];                                               
@@ -383,7 +453,7 @@ void handle_client(int client_fd, SSL *ssl)
                     break;                                                   
                 }
 
-                int bytes_sent = send(data_fd, file_data, bytes_read, 0);
+                int bytes_sent = SSL_write(data_ssl, file_data, bytes_read);
                 if (bytes_sent <= 0)
                 {
                     // TODO: implement error handling
@@ -394,6 +464,8 @@ void handle_client(int client_fd, SSL *ssl)
             }
             fclose(file_added);
             //CLOSE DATA CHANNEL
+            SSL_shutdown(data_ssl);
+            SSL_free(data_ssl);
             close(data_fd);
             
             const char *resp = "GET OK\n";
@@ -490,6 +562,27 @@ void handle_client(int client_fd, SSL *ssl)
                 continue;
             }
             close(data_listen_fd);
+            
+            // Set up TLS on data channel
+            SSL *data_ssl = SSL_new(data_ctx);
+            if (!data_ssl)
+            {
+                fprintf(stderr, "SSL_new failed for data channel (PUT)\n");
+                close(data_fd);
+                fclose(new_file);
+                continue;
+            }
+            SSL_set_fd(data_ssl, data_fd);
+            if (SSL_accept(data_ssl) <= 0)
+            {
+                fprintf(stderr, "SSL_accept failed for data channel (PUT)\n");
+                ERR_print_errors_fp(stderr);
+                SSL_free(data_ssl);
+                close(data_fd);
+                fclose(new_file);
+                continue;
+            }
+            
             int buffer_size = 4096;
             char file_data[buffer_size];
             int current_length = 0;
@@ -497,7 +590,7 @@ void handle_client(int client_fd, SSL *ssl)
             {
                 int remaining_bytes = file_length - current_length;
                 int to_read = (remaining_bytes < buffer_size) ? remaining_bytes : buffer_size;
-                int bytes_read = recv(data_fd, file_data, to_read, 0);
+                int bytes_read = SSL_read(data_ssl, file_data, to_read);
                 if (bytes_read <= 0)
                 {
                     break;
@@ -505,6 +598,8 @@ void handle_client(int client_fd, SSL *ssl)
                 fwrite(file_data, sizeof(char), bytes_read, new_file);
                 current_length = current_length + bytes_read;
             }
+            SSL_shutdown(data_ssl);
+            SSL_free(data_ssl);
             close(data_fd);
             fclose(new_file);
             const char *resp = "PUT OK\n";

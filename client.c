@@ -186,6 +186,24 @@ int main(int argc, char *argv[])
                 continue;
             }
             
+            // Set up TLS on data channel
+            SSL *data_ssl = SSL_new(ctx);
+            if (!data_ssl)
+            {
+                fprintf(stderr, "SSL_new failed for data channel\n");
+                close(data_fd);
+                continue;
+            }
+            SSL_set_fd(data_ssl, data_fd);
+            if (SSL_connect(data_ssl) <= 0)
+            {
+                fprintf(stderr, "SSL_connect failed for data channel\n");
+                ERR_print_errors_fp(stderr);
+                SSL_free(data_ssl);
+                close(data_fd);
+                continue;
+            }
+            
             // Create local file
             remote_name[strcspn(remote_name, "\r\n")] = '\0';
             char *basename = strrchr(remote_name, '/');
@@ -206,10 +224,12 @@ int main(int argc, char *argv[])
                 while (drained < file_size)
                 {
                     int to_read = (file_size - drained > 4096) ? 4096 : (file_size - drained);
-                    int r = recv(data_fd, drain, to_read, 0);
+                    int r = SSL_read(data_ssl, drain, to_read);
                     if (r <= 0) break;
                     drained += r;
                 }
+                SSL_shutdown(data_ssl);
+                SSL_free(data_ssl);
                 close(data_fd);
                 continue;
             }
@@ -226,7 +246,7 @@ int main(int argc, char *argv[])
                 {
                     bytes_to_read = remaining;
                 }
-                int bytes_recv = recv(data_fd, file_data, bytes_to_read, 0);
+                int bytes_recv = SSL_read(data_ssl, file_data, bytes_to_read);
                 if (bytes_recv <= 0)
                 {
                     printf("Connection error while receiving file\n");
@@ -236,6 +256,8 @@ int main(int argc, char *argv[])
                 current_length += bytes_recv;
             }
             fclose(new_file);
+            SSL_shutdown(data_ssl);
+            SSL_free(data_ssl);
             close(data_fd);
             printf("Downloaded %s (%ld bytes)\n", argument_one, file_size);
             
@@ -326,6 +348,26 @@ int main(int argc, char *argv[])
                 fclose(file_added);
                 continue;
             }
+            
+            // Set up TLS on data channel
+            SSL *data_ssl = SSL_new(ctx);
+            if (!data_ssl)
+            {
+                fprintf(stderr, "SSL_new failed for data channel (PUT)\n");
+                close(data_fd);
+                fclose(file_added);
+                continue;
+            }
+            SSL_set_fd(data_ssl, data_fd);
+            if (SSL_connect(data_ssl) <= 0)
+            {
+                fprintf(stderr, "SSL_connect failed for data channel (PUT)\n");
+                ERR_print_errors_fp(stderr);
+                SSL_free(data_ssl);
+                close(data_fd);
+                fclose(file_added);
+                continue;
+            }
 
             int buffer_size = 4096;
             char file_data[buffer_size];
@@ -339,7 +381,7 @@ int main(int argc, char *argv[])
                     bytes_to_read = remaining_bytes;
                 }
                 size_t bytes_read = fread(file_data, sizeof(char), bytes_to_read, file_added);
-                int bytes_sent = send(data_fd, file_data, bytes_read, 0);
+                int bytes_sent = SSL_write(data_ssl, file_data, bytes_read);
                 if (bytes_sent <= 0)
                 {
                     //TODO: implement error handling
@@ -347,6 +389,8 @@ int main(int argc, char *argv[])
                 current_length = current_length + bytes_read;
             }
             fclose(file_added);
+            SSL_shutdown(data_ssl);
+            SSL_free(data_ssl);
             close(data_fd);
             n = SSL_read(ssl, response, sizeof(response)-1);
             if (n <= 0)
