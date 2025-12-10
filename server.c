@@ -39,6 +39,9 @@ SSL_CTX *data_ctx = NULL;
 
 int main(void)
 {
+    // Ignore SIGPIPE to prevent crash when writing to closed sockets
+    signal(SIGPIPE, SIG_IGN);
+    
     // Open log file
     log_fp = fopen(LOG_FILE, "a");
     if (!log_fp)
@@ -274,28 +277,36 @@ ssize_t recv_line(int fd, SSL* ssl, char *buf, size_t max_len)
 void handle_client(int client_fd, SSL *ssl)
 {
     char cmd[MAX_CMD_LEN];
+    int authenticated = 0;  // Track if user is logged in
+    char username[64] = "";  // Store logged-in username
+    
     server_log("Client connected, fd=%d", client_fd);
     
     // Send welcome message to client
-    const char *welcome = "Welcome to FTP Server\n";
+    const char *welcome = "Welcome to FTP Server (use AUTH <user> <pass> to login)\n";
     SSL_write(ssl, welcome, strlen(welcome));
     
     while (1)
     {
         ssize_t n = recv_line(client_fd, ssl, cmd, MAX_CMD_LEN);
-        char* command = strtok(cmd, " \n");
-        char* argument_one = strtok(NULL, " \n");
-        char* argument_two = strtok(NULL, " \n");
         if (n <= 0)
         {
+            if (n == 0)
+            {
+                printf("Connection closed by client\n");
+                server_log("Connection closed by client");
+            }
             break; //connection closed or error
         }
         
-        if (n==0)
+        char* command = strtok(cmd, " \n");
+        char* argument_one = strtok(NULL, " \n");
+        char* argument_two = strtok(NULL, " \n");
+        
+        if (command == NULL)
         {
-            printf("Connection closed by client\n");
-            server_log("Connection closed by client");
-            break;
+            // Empty command, skip
+            continue;
         }
 
         printf("Received command: %s\n", cmd);
@@ -316,23 +327,87 @@ void handle_client(int client_fd, SSL *ssl)
         else if (strcmp(command, "AUTH") == 0)
         {
             // Simple hardcoded auth for testing
+            // TODO: Replace with proper user database
             if (argument_one && argument_two &&
                 strcmp(argument_one, "admin") == 0 &&
                 strcmp(argument_two, "password") == 0)
             {
-                const char *resp = "AUTH OK\n";
+                authenticated = 1;
+                strncpy(username, argument_one, sizeof(username) - 1);
+                username[sizeof(username) - 1] = '\0';
+                const char *resp = "AUTH OK - You now have full access\n";
                 SSL_write(ssl, resp, strlen(resp));
                 server_log("AUTH OK for user: %s", argument_one);
             }
             else
             {
+                authenticated = 0;
+                username[0] = '\0';
                 const char *resp = "AUTH FAILED\n";
                 SSL_write(ssl, resp, strlen(resp));
                 server_log("AUTH FAILED for user: %s", argument_one ? argument_one : "NULL");
             }
         }
+        else if (strcmp(command, "LOGOUT") == 0)
+        {
+            if (authenticated)
+            {
+                server_log("User %s logged out", username);
+                authenticated = 0;
+                username[0] = '\0';
+                const char *resp = "LOGOUT OK - You now have read-only access\n";
+                SSL_write(ssl, resp, strlen(resp));
+            }
+            else
+            {
+                const char *resp = "You are not logged in\n";
+                SSL_write(ssl, resp, strlen(resp));
+            }
+        }
+        else if (strcmp(command, "WHOAMI") == 0)
+        {
+            char resp[128];
+            if (authenticated)
+            {
+                snprintf(resp, sizeof(resp), "Logged in as: %s\n", username);
+            }
+            else
+            {
+                snprintf(resp, sizeof(resp), "Not logged in (read-only access)\n");
+            }
+            SSL_write(ssl, resp, strlen(resp));
+        }
+        else if (strcmp(command, "HELP") == 0)
+        {
+            const char *help_msg = 
+                "Available commands:\n"
+                "  PING              - Test connection\n"
+                "  AUTH <user> <pass>- Login for write access\n"
+                "  LOGOUT            - Logout\n"
+                "  WHOAMI            - Show current user\n"
+                "  LIST [dir]        - List directory contents\n"
+                "  PWD               - Print working directory\n"
+                "  GET <file>        - Download file\n"
+                "  PUT <file> [dest] - Upload file (requires login)\n"
+                "  CWD <dir>         - Change directory (requires login)\n"
+                "  DELE <file>       - Delete file (requires login)\n"
+                "  MKDIR <dir>       - Create directory (requires login)\n"
+                "  RMDIR <dir>       - Remove directory (requires login)\n"
+                "  QUIT              - Disconnect\n"
+                "  HELP              - Show this help\n";
+            SSL_write(ssl, help_msg, strlen(help_msg));
+        }
         else if (strcmp(command, "GET") == 0)
         {
+            // Check for required argument
+            if (!argument_one)
+            {
+                const char *resp = "ERROR: GET requires filename\n";
+                SSL_write(ssl, resp, strlen(resp));
+                server_log("GET failed - missing filename");
+                continue;
+            }
+            
             // Path safety check
             if (!is_path_safe(argument_one))
             {
@@ -475,6 +550,28 @@ void handle_client(int client_fd, SSL *ssl)
         }
         else if (strcmp(command, "PUT") == 0)
         {
+            // Requires authentication
+            if (!authenticated)
+            {
+                const char *resp = "ERROR: Permission denied - login required (AUTH <user> <pass>)\n";
+                SSL_write(ssl, resp, strlen(resp));
+                server_log("PUT denied - not authenticated");
+                continue;
+            }
+            
+            // Parse: PUT <dest_path> <size> [src_basename]
+            // argument_one = dest_path, argument_two = size, argument_three = src_basename (optional)
+            char *argument_three = strtok(NULL, " \n");
+            
+            // Check for required arguments
+            if (!argument_one || !argument_two)
+            {
+                const char *resp = "ERROR: PUT requires filename and size\n";
+                SSL_write(ssl, resp, strlen(resp));
+                server_log("PUT failed - missing arguments");
+                continue;
+            }
+            
             // Path safety check
             if (!is_path_safe(argument_one))
             {
@@ -495,12 +592,37 @@ void handle_client(int client_fd, SSL *ssl)
                 continue;
             }
             
-            FILE* new_file = fopen(argument_one, "wb");
+            // Build final path - if destination is a directory, append the source filename
+            char final_path[PATH_MAX];
+            struct stat path_stat;
+            if (stat(argument_one, &path_stat) == 0 && S_ISDIR(path_stat.st_mode))
+            {
+                // It's an existing directory - append source basename
+                if (argument_three && strlen(argument_three) > 0)
+                {
+                    snprintf(final_path, PATH_MAX, "%s/%s", argument_one, argument_three);
+                }
+                else
+                {
+                    // No basename provided, use destination as-is (will fail)
+                    const char *resp = "ERROR: Destination is a directory, specify filename\n";
+                    SSL_write(ssl, resp, strlen(resp));
+                    server_log("PUT failed - destination is directory: %s", argument_one);
+                    continue;
+                }
+            }
+            else
+            {
+                strncpy(final_path, argument_one, PATH_MAX - 1);
+                final_path[PATH_MAX - 1] = '\0';
+            }
+            
+            FILE* new_file = fopen(final_path, "wb");
             if (!new_file)
             {
                 const char *resp = "ERROR: Cannot create file\n";
                 SSL_write(ssl, resp, strlen(resp));
-                server_log("PUT failed - cannot create: %s", argument_one);
+                server_log("PUT failed - cannot create: %s", final_path);
                 continue;
             }
             int file_length = atoi(argument_two);
@@ -570,6 +692,8 @@ void handle_client(int client_fd, SSL *ssl)
                 fprintf(stderr, "SSL_new failed for data channel (PUT)\n");
                 close(data_fd);
                 fclose(new_file);
+                const char *resp = "ERROR: SSL setup failed\n";
+                SSL_write(ssl, resp, strlen(resp));
                 continue;
             }
             SSL_set_fd(data_ssl, data_fd);
@@ -580,12 +704,15 @@ void handle_client(int client_fd, SSL *ssl)
                 SSL_free(data_ssl);
                 close(data_fd);
                 fclose(new_file);
+                const char *resp = "ERROR: SSL handshake failed\n";
+                SSL_write(ssl, resp, strlen(resp));
                 continue;
             }
             
             int buffer_size = 4096;
             char file_data[buffer_size];
             int current_length = 0;
+            int read_error = 0;
             while(current_length < file_length)
             {
                 int remaining_bytes = file_length - current_length;
@@ -593,6 +720,10 @@ void handle_client(int client_fd, SSL *ssl)
                 int bytes_read = SSL_read(data_ssl, file_data, to_read);
                 if (bytes_read <= 0)
                 {
+                    int ssl_err = SSL_get_error(data_ssl, bytes_read);
+                    fprintf(stderr, "PUT SSL_read error: bytes_read=%d, ssl_err=%d\n", bytes_read, ssl_err);
+                    ERR_print_errors_fp(stderr);
+                    read_error = 1;
                     break;
                 }
                 fwrite(file_data, sizeof(char), bytes_read, new_file);
@@ -602,9 +733,20 @@ void handle_client(int client_fd, SSL *ssl)
             SSL_free(data_ssl);
             close(data_fd);
             fclose(new_file);
-            const char *resp = "PUT OK\n";
-            SSL_write(ssl, resp, strlen(resp));
-            server_log("PUT success: %s (%d bytes)", argument_one, file_length);
+            
+            if (read_error || current_length < file_length)
+            {
+                fprintf(stderr, "PUT incomplete: received %d of %d bytes\n", current_length, file_length);
+                const char *resp = "ERROR: File transfer incomplete\n";
+                SSL_write(ssl, resp, strlen(resp));
+                server_log("PUT failed - incomplete: %s (%d of %d bytes)", argument_one, current_length, file_length);
+            }
+            else
+            {
+                const char *resp = "PUT OK\n";
+                SSL_write(ssl, resp, strlen(resp));
+                server_log("PUT success: %s (%d bytes)", argument_one, file_length);
+            }
         }
         else if (strcmp(command, "LIST") == 0)
         {
@@ -677,11 +819,24 @@ void handle_client(int client_fd, SSL *ssl)
         }
         else if (strcmp(command, "CWD") == 0)
         {
+            // Requires authentication
+            if (!authenticated)
+            {
+                const char *resp = "ERROR: Permission denied - login required\n";
+                SSL_write(ssl, resp, strlen(resp));
+                continue;
+            }
+            if (!argument_one)
+            {
+                const char *resp = "ERROR: CWD requires directory path\n";
+                SSL_write(ssl, resp, strlen(resp));
+                continue;
+            }
             if (!is_path_safe(argument_one))
             {
                 const char *resp = "ERROR: Invalid path\n";
                 SSL_write(ssl, resp, strlen(resp));
-                server_log("CWD blocked - unsafe path: %s", argument_one ? argument_one : "NULL");
+                server_log("CWD blocked - unsafe path: %s", argument_one);
                 continue;
             }
             
@@ -700,11 +855,24 @@ void handle_client(int client_fd, SSL *ssl)
         }
         else if (strcmp(command, "DELE") == 0)
         {
+            // Requires authentication
+            if (!authenticated)
+            {
+                const char *resp = "ERROR: Permission denied - login required\n";
+                SSL_write(ssl, resp, strlen(resp));
+                continue;
+            }
+            if (!argument_one)
+            {
+                const char *resp = "ERROR: DELE requires filename\n";
+                SSL_write(ssl, resp, strlen(resp));
+                continue;
+            }
             if (!is_path_safe(argument_one))
             {
                 const char *resp = "ERROR: Invalid path\n";
                 SSL_write(ssl, resp, strlen(resp));
-                server_log("DELE blocked - unsafe path: %s", argument_one ? argument_one : "NULL");
+                server_log("DELE blocked - unsafe path: %s", argument_one);
                 continue;
             }
             
@@ -723,14 +891,28 @@ void handle_client(int client_fd, SSL *ssl)
         }
         else if (strcmp(command, "MKDIR") == 0)
         {
+            // Requires authentication
+            if (!authenticated)
+            {
+                const char *resp = "ERROR: Permission denied - login required\n";
+                SSL_write(ssl, resp, strlen(resp));
+                continue;
+            }
+            if (!argument_one)
+            {
+                const char *resp = "ERROR: MKDIR requires directory name\n";
+                SSL_write(ssl, resp, strlen(resp));
+                continue;
+            }
             // Path safety check
             if (!is_path_safe(argument_one))
             {
                 const char *resp = "ERROR: Invalid path\n";
                 SSL_write(ssl, resp, strlen(resp));
-                server_log("MKDIR blocked - unsafe path: %s", argument_one ? argument_one : "NULL");
+                server_log("MKDIR blocked - unsafe path: %s", argument_one);
+                continue;
             }
-            else if (mkdir(argument_one, 0755) == 0)
+            if (mkdir(argument_one, 0755) == 0)
             {
                 const char *resp = "MKDIR OK\n";
                 SSL_write(ssl, resp, strlen(resp));
@@ -745,13 +927,27 @@ void handle_client(int client_fd, SSL *ssl)
         }
         else if (strcmp(command, "RMDIR") == 0)
         {
+            // Requires authentication
+            if (!authenticated)
+            {
+                const char *resp = "ERROR: Permission denied - login required\n";
+                SSL_write(ssl, resp, strlen(resp));
+                continue;
+            }
+            if (!argument_one)
+            {
+                const char *resp = "ERROR: RMDIR requires directory name\n";
+                SSL_write(ssl, resp, strlen(resp));
+                continue;
+            }
             if (!is_path_safe(argument_one))
             {
                 const char *resp = "ERROR: Invalid path\n";
                 SSL_write(ssl, resp, strlen(resp));
-                server_log("RMDIR blocked - unsafe path: %s", argument_one ? argument_one : "NULL");
+                server_log("RMDIR blocked - unsafe path: %s", argument_one);
+                continue;
             }
-            else if (rmdir(argument_one) == 0)
+            if (rmdir(argument_one) == 0)
             {
                 const char *resp = "RMDIR OK\n";
                 SSL_write(ssl, resp, strlen(resp));

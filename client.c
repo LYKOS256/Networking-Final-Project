@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <signal.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
@@ -15,6 +16,9 @@ SSL_CTX *create_client_ctx();
 
 int main(int argc, char *argv[])
 {
+    // Ignore SIGPIPE to prevent crash when writing to closed sockets
+    signal(SIGPIPE, SIG_IGN);
+    
     if (argc < 2)
     {
         fprintf(stderr, "Usage: %s <server_ip>\n", argv[0]);
@@ -288,9 +292,17 @@ int main(int argc, char *argv[])
             //converting file size into a string
             char file_size_string[32];
             sprintf(file_size_string, "%ld", file_size);
-            //sending the input data but with the file size attached
-            char send_data[strlen(input_command) + strlen(dest_path) + strlen(file_size_string) + 3];
-            sprintf(send_data, "%s %s %s\n", input_command, dest_path, file_size_string);
+            
+            // Extract basename from source path for server to use if dest is a directory
+            const char *src_basename = strrchr(src_path, '/');
+            if (src_basename)
+                src_basename++;  // Skip the '/'
+            else
+                src_basename = src_path;
+            
+            //sending the input data: PUT <dest> <size> <src_basename>
+            char send_data[strlen(input_command) + strlen(dest_path) + strlen(file_size_string) + strlen(src_basename) + 4];
+            sprintf(send_data, "%s %s %s %s\n", input_command, dest_path, file_size_string, src_basename);
             if (SSL_write(ssl, send_data, strlen(send_data)) < 0)
             {
                 perror("send PUT header");
@@ -395,7 +407,9 @@ int main(int argc, char *argv[])
             n = SSL_read(ssl, response, sizeof(response)-1);
             if (n <= 0)
             {
-                printf("Connection closed by server or error (PUT final)\n");
+                int ssl_err = SSL_get_error(ssl, n);
+                printf("Connection closed by server or error (PUT final): n=%zd, ssl_err=%d\n", n, ssl_err);
+                ERR_print_errors_fp(stderr);
                 break;
             }
             response[n] = '\0';

@@ -9,51 +9,79 @@ running the client and server from within these files makes it easier to see the
 for me)
 
 Compiling instructions (from ./Networking-Final-Project):
-    cd ..
-    gcc server.c -o server -lcrypto -lssl
-    cd ./server_directory/
-    ../server
+    cd ..;
+    gcc server.c -o server -lcrypto -lssl;
+    cd ./server_directory/;
+    ../server;
 
-    cd ..
-    gcc client.c -o client -lcrypto -lssl
-    cd ./client_directory/
-    ../client 127.0.0.1
+    cd ..;
+    gcc client.c -o client -lcrypto -lssl;
+    cd ./client_directory/;
+    ../client 127.0.0.1;
 
 
-Commands currently implemented:
+AUTHENTICATION SYSTEM
 
-AUTH <user> <pass>:
-    currently just "admin" "password", doesn't actually enforce permissions.
+Users must authenticate to perform write operations.
+- Without login: Can only use GET, LIST, PWD, PING, HELP, QUIT
+- With login: Full access to all commands including PUT, DELE, MKDIR, RMDIR, CWD
 
-PUT <file> <dest>:              example: PUT test.txt ./dironserver
-    takes a file from the client and uploads it to the server
+Default credentials: admin / password
 
-GET <file>:
-    downloads a file from the server
+
+COMMANDS
+
+--- Public Commands (no login required) ---
 
 PING:
-    Responds PONG
+    Responds PONG - test if server is alive
 
-LIST <dir>:
-    shows the directory's content
+GET <file>:
+    Downloads a file from the server
+
+LIST [dir]:
+    Shows the directory's content (defaults to current directory)
 
 PWD:
-    print working directory
+    Print working directory
 
-CWD:
-    modify current working directory
+HELP:
+    Shows list of available commands
 
-DELE:
-    Delete a file from the server.
-
-MKDIR <dir>:
-    Makes a directory.
-RMDIR <dir>:
-    Removes a dir.
+WHOAMI:
+    Shows current login status
 
 QUIT:
-    closes the client connection.
+    Closes the client connection
 
 
-TODO:
-[ ] - enforcing AUTH permissions (admin/user/not logged in)
+--- Authenticated Commands (login required) ---
+
+AUTH <user> <pass>:
+    Login to gain write access
+    Example: AUTH admin password
+
+LOGOUT:
+    Logout and return to read-only access
+
+PUT <file> [dest]:
+    Takes a file from the client and uploads it to the server
+    Example: PUT test.txt
+    Example: PUT test.txt ./dironserver   (uploads to directory)
+
+CWD <dir>:
+    Modify current working directory
+
+DELE <file>:
+    Delete a file from the server
+
+MKDIR <dir>:
+    Makes a directory
+
+RMDIR <dir>:
+    Removes a directory
+
+
+Possible additions:
+- user database (instead of hardcoded credentials)
+- per-user home directories
