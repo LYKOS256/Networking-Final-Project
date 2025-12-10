@@ -11,7 +11,7 @@ for me)
 Compiling instructions (from ./Networking-Final-Project):
     cd ..
     gcc server.c -o server -lcrypto -lssl
-    cd ./server_directory.c
+    cd ./server_directory/
     ../server
 
     cd ..
@@ -55,27 +55,5 @@ QUIT:
     closes the client connection.
 
 
-
-
 TODO:
-
-[ ] - Multiple connections (easy fork/exec)
 [ ] - enforcing AUTH permissions (admin/user/not logged in)
-[ ] - server.log file might get quite large! maybe we can do something like ./server --fresh to reset it?
-[ ] - add a HELP command?
-
-
-Are we cheating around real FTP by having it just be an rlogin < -- > rlogin connection? 
-this feels like a glorified shell.
-
-I asked GPT:
-
-Traditional FTP:
-Port 21: Control channel (commands like LIST, GET, PUT)
-Port 20: Data channel (actual file transfers)
-Two separate connections for backwards compatibility with NCP
-
-Your Implementation:
-Port 5000: Single duplex connection for everything
-Commands AND file data all flow over the same socket
-Much simpler but not "true" FTP
